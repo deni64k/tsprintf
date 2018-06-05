@@ -1,7 +1,7 @@
 all: run
 
 build/main: main.cxx
-	g++-7 -fconcepts -std=c++17 $< -o build/main
+	g++-8 $(CXXFLAGS) -fconcepts -std=c++17 $< -o build/main
 
 run: build/main
 	@./$^

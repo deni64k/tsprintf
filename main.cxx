@@ -13,7 +13,7 @@ template <typename T> struct dependent_false: std::false_type {};
 template <typename CharT, CharT ...Cs>
 struct string_literal {
   static constexpr std::size_t const size = sizeof... (Cs);
-  using type = CharT;
+  using element_type = CharT;
 
   constexpr inline auto array() const {
     return std::make_array(Cs...);
@@ -57,14 +57,44 @@ namespace details {
 
 template <typename Arg>
 constexpr void validate_integer() {
-  static_assert(std::is_integral_v<std::remove_reference_t<Arg>>,
-                "mismatch of an argument type and a format specifiers %i");
+  static_assert(std::is_same_v<int, std::make_signed_t<std::decay_t<Arg>>>,
+                "mismatch of an argument type and an integer format specifier");
+}
+
+template <typename Arg>
+constexpr void validate_hex() {
+  static_assert(std::is_same_v<unsigned int, std::decay_t<Arg>>,
+                "mismatch of an argument type and a hex format specifier");
+}
+
+template <typename Arg>
+constexpr void validate_double() {
+  static_assert(std::is_same_v<double, std::decay_t<Arg>>,
+                "mismatch of an argument type and a floating-point format specifier");
+}
+
+template <typename Arg>
+constexpr void validate_char() {
+  static_assert(std::is_same_v<int, std::decay_t<Arg>>,
+                "mismatch of an argument type and a character format specifiers");
 }
 
 template <typename Arg>
 constexpr void validate_string() {
   static_assert(std::is_convertible_v<char const *, std::decay_t<Arg>>,
-                "mismatch of an argument type and a format specifiers %s");
+                "mismatch of an argument type and a string format specifier");
+}
+
+template <typename Arg>
+constexpr void validate_pointer() {
+  static_assert(std::is_pointer_v<std::decay_t<Arg>>,
+                "mismatch of an argument type and a pointer format specifier");
+}
+
+template <typename Arg>
+constexpr void validate_written() {
+  static_assert(std::is_convertible_v<int const *, std::decay_t<Arg>>,
+                "mismatch of an argument type and a format specifier %n");
 }
 
 template <typename Arg>
@@ -72,26 +102,79 @@ constexpr void validate_unknown() {
   static_assert(dependent_false<Arg>{}, "unsupported format specifier");
 }
 
+template <auto ...Specs, typename T>
+constexpr bool in(T c) {
+  return (... || [c](auto spec) { return c == spec; }(Specs));
+}
+
 template <typename Fmt, std::size_t N, std::size_t FmtI, typename Arg = void, typename ...Args>
 struct validate_helper {
-  constexpr bool loop(Fmt &&fmt) && {
+  constexpr bool loop(Fmt &&fmt) const {
     if constexpr (std::get<FmtI>(fmt.array()) == '%') {
-      static_assert(std::bool_constant<FmtI + 1 < N>{}, "Incorrect format string");
+      static_assert(std::bool_constant<FmtI + 1 < N>{}, "dangling format specifier");
 
-      if constexpr (std::get<FmtI + 1>(fmt.array()) == '%') {
-        return validate_helper<Fmt, N, FmtI + 2, Arg, Args...>{}.loop(std::move(fmt));
-      } else if constexpr (std::get<FmtI + 1>(fmt.array()) == 'd') {
+      constexpr auto const spec_off = specifier_offset<>(fmt);
+      static_assert(FmtI + spec_off < N, "no type sub-specifier found");
+
+      constexpr auto const spec = std::get<FmtI + spec_off>(fmt.array());
+
+      if constexpr (spec == '%') {
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Arg, Args...>{}.loop(std::move(fmt));
+      } else if constexpr (in<'d', 'i'>(spec)) {
         validate_integer<Arg>();
-        return validate_helper<Fmt, N, FmtI + 2, Args...>{}.loop(std::move(fmt));
-      } else if constexpr (std::get<FmtI + 1>(fmt.array()) == 's') {
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Args...>{}.loop(std::move(fmt));
+      } else if constexpr (in<'u', 'o', 'x', 'X'>(spec)) {
+        validate_hex<Arg>();
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Args...>{}.loop(std::move(fmt));
+      } else if constexpr (in<'f', 'F', 'e', 'E', 'g', 'G', 'a', 'A'>(spec)) {
+        validate_double<Arg>();
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Args...>{}.loop(std::move(fmt));
+      } else if constexpr (spec == 'c') {
+        validate_char<Arg>();
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Args...>{}.loop(std::move(fmt));
+      } else if constexpr (spec == 's') {
         validate_string<Arg>();
-        return validate_helper<Fmt, N, FmtI + 2, Args...>{}.loop(std::move(fmt));
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Args...>{}.loop(std::move(fmt));
+      } else if constexpr (spec == 'p') {
+        validate_pointer<Arg>();
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Args...>{}.loop(std::move(fmt));
+      } else if constexpr (spec == 'n') {
+        validate_written<Arg>();
+        return validate_helper<Fmt, N, FmtI + spec_off + 1, Args...>{}.loop(std::move(fmt));
       } else {
         validate_unknown<Arg>();
         return false;
       }
     } else
       return validate_helper<Fmt, N, FmtI + 1, Arg, Args...>{}.loop(std::move(fmt));
+  }
+
+ private:
+  // template <std::size_t I = 1>
+  // static constexpr std::size_t
+  // length_offset(std::array<typename Fmt::element_type, N> arr) {
+  //   return in<'h', 'l', 'j', 'z', 't', 'L'>(std::get<FmtI + I>(arr)) ?
+  //       I : length_offset<I + 1>(arr);
+  // }
+
+  template <std::size_t I = 1>
+  static constexpr std::size_t
+  specifier_offset(Fmt const &fmt) {
+    if constexpr (FmtI + I == N)
+      return N;
+    else if constexpr (constexpr auto spec = std::get<FmtI + I>(fmt.array()); in<
+                       '%',
+                       'd', 'i',
+                       'u', 'o', 'x', 'X',
+                       'f', 'F', 'e', 'E', 'g', 'G', 'a', 'A',
+                       'c',
+                       's',
+                       'p',
+                       'n'
+                       >(spec))
+      return I;
+    else
+      return specifier_offset<I + 1>(fmt);
   }
 };
 
